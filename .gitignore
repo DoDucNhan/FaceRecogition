@@ -1,3 +1,10 @@
+# Current work directory
+AFD_Images/
+logs/
+outputs/
+*.onnx
+*.pt
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

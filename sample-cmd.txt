@@ -1,0 +1,48 @@
+python main.py --data_dir ./AFD_Images \
+    --output_dir ./outputs/facenet_output \
+    --pretrained \
+    --validate_images \
+    --batch_size 128 \
+    --epochs 10 \
+    --early_stopping 0 \
+    --lr 0.005 \
+    --margin 0.4 \
+    --mining batch_hard \
+    --freeze_groups 3 \
+    --unfreeze_epoch 5 \
+    --lr_scheduler cosine \
+    --save_freq 5 \
+    --num_workers 4
+
+
+python main.py --pretrained \
+    --use_arcface \
+    --use_unpg \
+    --validate_images \
+    --data_dir ./AFD_Images \
+    --output_dir ./outputs/facenet_arcface-unpg_output \
+    --batch_size 64 \
+    --grad_accumulation 2 \
+    --wisker_size 1.5 \
+    --arcface_margin 0.5 \
+    --arcface_scale 64.0 \
+    --lr 0.005 \
+    --lr_scheduler sgdr \
+    --visualize_features \
+    --freeze_groups 4 \
+    --unfreeze_epoch 300 \
+    --epochs 3000 \
+    --save_freq 100 \
+    --vis_frequency 100 \
+    --early_stopping 0 
+    
+
+
+python main.py --data_dir ./AFD_Images \
+    --output_dir ./facenet_output \
+    --pretrained \
+    --resume ./facenet_output/latest_checkpoint.pth \
+    --batch_size 128 \
+    --epochs 100 \
+    --early_stopping 0 \
+    --num_workers 4
