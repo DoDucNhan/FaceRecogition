@@ -5,17 +5,19 @@ import numpy as np
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader, Sampler
-from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
+from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau, CosineAnnealingWarmRestarts
 import torchvision.transforms as transforms
 from sklearn.model_selection import train_test_split
 
 # Import from our modules
+from utils.visualization import FeatureVisualizer
 from data.dataset import load_afd_dataset, AFDDataset
-from model.facenet import freeze_layers, get_model_128
-from training.train import train_epoch, evaluate, train_epoch_arcface, evaluate_arcface
-from model.loss import TripletLoss, ArcFaceLoss
-from training.checkpoint import save_checkpoint, resume_from_checkpoint
+from model.facenet import get_model, freeze_layers, get_layer_groups, print_trainable_parameters
+from training.train import train_epoch_arcface, evaluate_arcface
+from model.loss import ArcFaceLoss
+from training.checkpoint import save_checkpoint, resume_from_checkpoint, load_metrics_for_logger
 from utils.helpers import set_seed, ensure_dir
+from utils.logger import TrainingLogger
 
 # torch.set_default_dtype(torch.float16)
 
@@ -82,14 +84,8 @@ def main():
     parser.add_argument('--early_stopping', type=int, default=10, 
                         help='Patience for early stopping (epochs with no improvement before stopping, 0 to disable)')
     parser.add_argument('--lr', type=float, default=0.005, help='Learning rate')
-    parser.add_argument('--margin', type=float, default=0.2, help='Margin for triplet loss')
-    parser.add_argument('--mining', choices=['batch_all', 'batch_hard'], default='batch_hard', 
-                        help='Triplet mining strategy')
-    parser.add_argument('--faces_per_identity', type=int, default=40, 
-                        help='Number of faces per identity in each batch')
+    
     # Arguments for ArcFace+UNPG
-    parser.add_argument('--use_arcface', action='store_true', 
-                        help='Use ArcFace loss instead of triplet loss')
     parser.add_argument('--use_unpg', action='store_true', 
                         help='Use Unified Negative Pair Generation with ArcFace')
     parser.add_argument('--arcface_scale', type=float, default=64.0, 
@@ -103,12 +99,22 @@ def main():
     parser.add_argument('--mixed_precision', action='store_true',
                         help='Use mixed precision training to save memory')
     
+    # Visualization parameters
+    parser.add_argument('--visualize_features', action='store_true', 
+                        help='Whether to visualize feature maps during training')
+    parser.add_argument('--vis_frequency', type=int, default=5,
+                        help='Frequency (in epochs) for feature visualization')
+    
+    #Logging parameters
+    parser.add_argument('--log_dir', type=str, default='./logs', help='Directory to save logs')
+    parser.add_argument('--experiment_name', type=str, default="facenet-tuning", help='Name for this experiment')
+    
     # Freezing parameters
     parser.add_argument('--freeze_groups', type=int, default=5, help='Initial number of groups to freeze')
     parser.add_argument('--unfreeze_epoch', type=int, default=5, help='Unfreeze a group every N epochs')
     
     # Learning rate parameters
-    parser.add_argument('--lr_scheduler', choices=['cosine', 'plateau'], default='cosine',
+    parser.add_argument('--lr_scheduler', choices=['cosine', 'plateau', 'sgdr'], default='cosine',
                         help='Learning rate scheduler')
     parser.add_argument('--lr_min', type=float, default=1e-6, help='Minimum learning rate')
     
@@ -131,10 +137,13 @@ def main():
     # Set device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+
+    # Logger
+    logger = TrainingLogger(args.log_dir, experiment_name=args.experiment_name)
     
     # Data transformations
     train_transform = transforms.Compose([
-        transforms.Resize((112, 112)),
+        transforms.Resize((160, 160)),
         transforms.RandomHorizontalFlip(),
         transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
         transforms.ToTensor(),
@@ -142,7 +151,7 @@ def main():
     ])
     
     val_transform = transforms.Compose([
-        transforms.Resize((112, 112)),
+        transforms.Resize((160, 160)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
@@ -156,31 +165,25 @@ def main():
     )
     
     # Get model
-    if args.use_arcface:
-        num_classes = len(label_to_idx)
-        model = get_model_128(pretrained=args.pretrained, device=device, 
-                        use_arcface=True, num_classes=num_classes)
-        
-        # ArcFace loss with optional UNPG
-        criterion = ArcFaceLoss(
-            embedding_size=128,
-            num_classes=num_classes,
-            s=args.arcface_scale,
-            m=args.arcface_margin,
-            use_unpg=args.use_unpg,
-            wisker_size=args.wisker_size
-        ).to(device)
-    else:
-        # Original triplet loss setup
-        model = get_model_128(pretrained=args.pretrained, device=device)
-        criterion = TripletLoss(margin=args.margin)
+    num_classes = len(label_to_idx)
+    model = get_model(pretrained=args.pretrained, device=device, 
+                    use_arcface=True, num_classes=num_classes)
+    
+    # ArcFace loss with optional UNPG
+    criterion = ArcFaceLoss(
+        embedding_size=512,
+        num_classes=num_classes,
+        s=args.arcface_scale,
+        m=args.arcface_margin,
+        use_unpg=args.use_unpg,
+        wisker_size=args.wisker_size
+    ).to(device)
     
     # Variables to track training
     start_epoch = 1
     best_accuracy = 0.0
-    current_accuracy = 0.0
+    prev_accuracy = 0.0
     current_frozen_groups = args.freeze_groups
-    label_to_idx = {}
     train_paths = None
     train_labels = None
     val_paths = None
@@ -191,35 +194,33 @@ def main():
     
     # Resume from checkpoint if specified
     if args.resume and os.path.isfile(args.resume):
+        load_metrics_for_logger(logger, args.resume)
         # Initialize criterion before resuming if using ArcFace
-        if args.use_arcface:
-            num_classes = len(label_to_idx) if label_to_idx else 0  # Will be updated by resume
-            criterion = ArcFaceLoss(
-                embedding_size=128,
-                num_classes=num_classes,
-                s=args.arcface_scale,
-                m=args.arcface_margin,
-                use_unpg=args.use_unpg,
-                wisker_size=args.wisker_size
-            ).to(device)
-        else:
-            criterion = TripletLoss(margin=args.margin)
+        num_classes = len(label_to_idx) if label_to_idx else 0  # Will be updated by resume
+        criterion = ArcFaceLoss(
+            embedding_size=512,
+            num_classes=num_classes,
+            s=args.arcface_scale,
+            m=args.arcface_margin,
+            use_unpg=args.use_unpg,
+            wisker_size=args.wisker_size
+        ).to(device)
 
         start_epoch, best_accuracy, loaded_label_to_idx, current_frozen_groups = resume_from_checkpoint(
             args.resume, model, optimizer, 
-            criterion=criterion if args.use_arcface else None
+            criterion=criterion
         )
         start_epoch += 1  # Start from next epoch
-        current_accuracy = best_accuracy
+        prev_accuracy = best_accuracy
         print(f"Resumed from epoch {start_epoch-1} with accuracy: {best_accuracy:.4f}")
         # Update label_to_idx from checkpoint
         label_to_idx = loaded_label_to_idx
         
         # If using ArcFace, update the criterion's num_classes in case it changed
-        if args.use_arcface and len(label_to_idx) != criterion.num_classes:
+        if len(label_to_idx) != criterion.num_classes:
             print(f"Updating ArcFace criterion with {len(label_to_idx)} classes")
             criterion = ArcFaceLoss(
-                embedding_size=128,
+                embedding_size=512,
                 num_classes=len(label_to_idx),
                 s=args.arcface_scale,
                 m=args.arcface_margin,
@@ -277,27 +278,14 @@ def main():
     val_dataset = AFDDataset(val_paths, val_labels, transform=val_transform)
     
     # For ArcFace+UNPG, we need standard batching
-    print(f"Using ArcFace: {args.use_arcface}, Using UNPG: {args.use_unpg}")
-    if args.use_arcface:
-        train_loader = DataLoader(
-            train_dataset, 
-            batch_size=args.batch_size,
-            shuffle=True,
-            num_workers=min(args.num_workers, 2),  # Reduce workers to save memory
-            pin_memory=True
-        )
-    else:
-        # Original triplet mining approach
-        train_loader = DataLoader(
-            train_dataset, 
-            batch_sampler=IdentityBatchSampler(
-                train_labels, 
-                args.batch_size, 
-                args.faces_per_identity
-            ),
-            num_workers=min(args.num_workers, 2),
-            pin_memory=True
-        )
+    print(f"Using UNPG: {args.use_unpg}")
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=min(args.num_workers, 2),  # Reduce workers to save memory
+        pin_memory=True
+    )
     
     val_loader = DataLoader(
         val_dataset, 
@@ -306,45 +294,112 @@ def main():
         num_workers=min(args.num_workers, 2),
         pin_memory=True
     )
+
+    # Initial freezing - freeze all except last 2 groups
+    if not args.resume:
+        # For new training, freeze all except the last groups
+        # initial_unfrozen_groups = 1
+        # current_frozen_groups = total_groups - initial_unfrozen_groups
+        print(f"Initially freezing {current_frozen_groups} groups")
+        current_frozen_groups = freeze_layers(model, current_frozen_groups)
+        optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=1e-5)
+        print_trainable_parameters(model)
     
     # Initialize scheduler
-    if args.lr_scheduler == 'cosine':
+    if args.lr_scheduler == 'sgdr':
+        scheduler = CosineAnnealingWarmRestarts(
+            optimizer, T_0=5, T_mult=2, eta_min=args.lr_min)
+    elif args.lr_scheduler == 'cosine':
         scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.lr_min)
     else:  # plateau
         scheduler = ReduceLROnPlateau(
-            optimizer, 
-            mode='max', 
-            factor=0.5, 
-            patience=3, 
-            min_lr=args.lr_min, 
-            verbose=True
-        )
+            optimizer, mode='max', factor=0.5, patience=3, 
+            min_lr=args.lr_min, verbose=True)
+
+    # Initialize tracking variables for adaptive unfreezing
+    adaptive_patience_counter = 0
+    prev_accuracy = 0
+
+    # Get initial layer groups
+    layer_groups = get_layer_groups(model)
+    total_groups = len(layer_groups)
 
     # Early stopping tracker
     patience_counter = 0
     # Initialize mixed precision scaler if enabled
     scaler = torch.amp.GradScaler('cuda') if args.mixed_precision else None
 
+    #------------------------------------------------------------------------
+    # Initialize feature visualizer if enabled
+    feature_visualizer = None
+    if args.visualize_features:
+        feature_visualizer = FeatureVisualizer(model, val_loader, device, args.output_dir)
+
+
     # Training loop
     for epoch in range(start_epoch, args.epochs + 1):
-        # Gradual unfreezing
-        if args.unfreeze_epoch > 0 and epoch % args.unfreeze_epoch == 0 and current_frozen_groups > 0:
-            current_frozen_groups -= 1
-            print(f"Unfreezing group, {current_frozen_groups} groups remain frozen")
-            current_frozen_groups = freeze_layers(model, current_frozen_groups)
+        # Visualize features before training if enabled
+        if feature_visualizer and epoch % args.vis_frequency == 0:
+            feature_visualizer.visualize_features(epoch)
         
+        # Gradual unfreezing
+        if ((args.unfreeze_epoch > 0 and epoch % args.unfreeze_epoch == 0 ) or adaptive_patience_counter >= 20) and current_frozen_groups > 0:
+            previous_frozen_groups = current_frozen_groups
+            current_frozen_groups -= 1
+            print(f"\n{'='*50}")
+            print(f"Unfreezing next layer group, {current_frozen_groups} groups remain frozen")
+            current_frozen_groups = freeze_layers(model, current_frozen_groups)
+            print_trainable_parameters(model)
+                
+            layer_groups = get_layer_groups(model)
+            # Identify newly unfrozen groups
+            newly_unfrozen_groups = []
+            for i in range(current_frozen_groups, previous_frozen_groups):
+                if i < len(layer_groups):
+                    newly_unfrozen_groups.extend(layer_groups[i])
+
+            # Collect newly unfrozen parameters
+            newly_unfrozen_params = []
+            for name, param in model.named_parameters():
+                if any(layer_name in name for layer_name in newly_unfrozen_groups) and param.requires_grad:
+                    newly_unfrozen_params.append(param)
+
+            optimizer.add_param_group({
+                'params': newly_unfrozen_params,
+                'weight_decay': optimizer.param_groups[0]['weight_decay']
+            })
+            # Reset counter
+            adaptive_patience_counter = 0
+            
+            # Implement warm restart for the optimizer
+            if args.lr_scheduler == 'sgdr':
+                # SGDR will handle the restart automatically on next call to step()
+                pass
+            else:
+                # Manual restart - reduce LR then reschedule
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = args.lr * 0.5  # Restart with lower LR
+                
+                # Recreate scheduler with remaining epochs
+                remaining_epochs = args.epochs - epoch
+                if args.lr_scheduler == 'cosine':
+                    scheduler = CosineAnnealingLR(
+                        optimizer, T_max=remaining_epochs, eta_min=args.lr_min)
+                else:  # plateau
+                    scheduler = ReduceLROnPlateau(
+                        optimizer, mode='max', factor=0.5, patience=3, 
+                        min_lr=args.lr_min, verbose=True)
+                    
+            print(f"Learning rate after restart: {optimizer.param_groups[0]['lr']:.8f}")
+            print(f"{'='*50}\n")
+
+
         # Train for one epoch
-        if args.use_arcface:
-            train_loss = train_epoch_arcface(
-                model, train_loader, criterion, optimizer, device, epoch,
-                grad_accumulation_steps=args.grad_accumulation,
-                scaler=scaler
-            )
-        else:
-            train_loss = train_epoch(
-                model, train_loader, optimizer, device, epoch, 
-                margin=args.margin, mining_method=args.mining
-            )
+        train_loss = train_epoch_arcface(
+            model, train_loader, criterion, optimizer, device, epoch,
+            grad_accumulation_steps=args.grad_accumulation,
+            scaler=scaler
+        )
         
         print(f"Epoch {epoch}, Train Loss: {train_loss:.4f}")
 
@@ -353,15 +408,15 @@ def main():
             torch.cuda.empty_cache()
         
         # Evaluate on validation set
-        if args.use_arcface:
-            accuracy, far = evaluate_arcface(model, val_loader, device)
-        else:
-            accuracy, far = evaluate(model, val_loader, device)
+        accuracy, far = evaluate_arcface(model, val_loader, device)
+   
         print(f"Validation Accuracy: {accuracy:.4f}")
         print(f"Validation FAR: {far:.4f}")
+
+        
         
         # Update scheduler
-        if args.lr_scheduler == 'cosine':
+        if args.lr_scheduler == 'cosine' or args.lr_scheduler == 'sgdr':
             scheduler.step()
         else:  # plateau
             scheduler.step(accuracy)
@@ -382,7 +437,12 @@ def main():
             }, os.path.join(args.output_dir, 'best_model.pth'))
             print(f"Saved best model with accuracy: {best_accuracy:.4f}")
         
-        elif accuracy < current_accuracy:
+        # Check if accuracy has improved
+        if accuracy > prev_accuracy + 0.001:  # 0.1% improvement threshold
+            layer_patience_counter = 0
+            patience_counter = 0
+        else:
+            layer_patience_counter += 1
             # Increment patience counter if no improvement
             patience_counter += 1
             print(f"No improvement for {patience_counter} epochs")
@@ -392,19 +452,29 @@ def main():
                 print(f"Early stopping after {patience_counter} epochs without improvement")
                 break
 
-        current_accuracy = accuracy
+
+        accuracy_delta = accuracy - prev_accuracy
+        if accuracy_delta < 0.001:  # If improvement is minimal
+            adaptive_patience_counter += 1
+            print(f"Limited improvement: {accuracy_delta:.4f}, patience counter: {adaptive_patience_counter}")
+        else:
+            # Good improvement, reset patience counter
+            adaptive_patience_counter = 0
+        
+        
+        prev_accuracy = accuracy
         
         # Save checkpoint for resumption
         if epoch % args.save_freq == 0:
             save_checkpoint(
-                model, optimizer, scheduler, epoch, current_accuracy,
+                model, optimizer, scheduler, epoch, prev_accuracy,
                 label_to_idx, current_frozen_groups, args,
                 os.path.join(args.output_dir, f'checkpoint_epoch_{epoch}.pth')
             )
         
         # Always save latest checkpoint for unexpected interruptions
         save_checkpoint(
-            model, optimizer, scheduler, epoch, current_accuracy,
+            model, optimizer, scheduler, epoch, prev_accuracy,
             label_to_idx, current_frozen_groups, args,
             os.path.join(args.output_dir, 'latest_checkpoint.pth')
         )
@@ -412,6 +482,18 @@ def main():
         # Print current learning rate
         current_lr = optimizer.param_groups[0]['lr']
         print(f"Current learning rate: {current_lr:.8f}")
+
+        # Log metrics
+        logger.log_epoch(
+            epoch=epoch,
+            train_loss=train_loss,
+            val_accuracy=accuracy,
+            val_far=far,
+            learning_rate=current_lr,
+            extra_metrics={
+                'unfrozen_groups': total_groups - current_frozen_groups
+            }
+        )
     
     print(f"Training completed! Best accuracy: {best_accuracy:.4f}")
 

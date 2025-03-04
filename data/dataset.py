@@ -1,12 +1,11 @@
 import os
-import torch
 from PIL import Image
 from torch.utils.data import Dataset
 from tqdm import tqdm
-from .validation import is_valid_image
 
-class AFDDataset(Dataset):
-    """Dataset class for Asian Face Dataset"""
+
+class FaceDataset(Dataset):
+    """Dataset class for facial recognition dataset"""
     def __init__(self, image_paths, labels, transform=None):
         self.image_paths = image_paths
         self.labels = labels
@@ -19,7 +18,7 @@ class AFDDataset(Dataset):
         img_path = self.image_paths[idx]
         label = self.labels[idx]
         
-        # Load image - we assume all images are valid at this point
+        # Load image
         img = Image.open(img_path).convert('RGB')
             
         # Apply transformation
@@ -28,9 +27,41 @@ class AFDDataset(Dataset):
                 
         return img, label
 
-def load_afd_dataset(data_dir, min_images_per_person=2, validate_images=True):
+
+def is_valid_image(img_path):
     """
-    Load the Asian Face Dataset from directory structure with image validation
+    Validate if an image can be properly loaded and is of usable quality
+    
+    Args:
+        img_path: Path to the image file
+        
+    Returns:
+        bool: True if image is valid, False otherwise
+    """
+    try:
+        with Image.open(img_path) as img:
+            # Check if image is valid
+            img.verify()
+            
+            # Open image again to check if it can be loaded properly
+            img = Image.open(img_path)
+            
+            # Convert to RGB (some images might be grayscale or RGBA)
+            img = img.convert('RGB')
+            
+            # Check minimum resolution (80x80)
+            width, height = img.size
+            if width < 80 or height < 80:
+                return False
+            
+            return True
+    except Exception:
+        return False
+
+
+def load_dataset(data_dir, min_images_per_person=2, validate_images=True):
+    """
+    Load the facial dataset from directory structure with image validation
     
     Args:
         data_dir: Path to dataset directory
@@ -78,7 +109,6 @@ def load_afd_dataset(data_dir, min_images_per_person=2, validate_images=True):
         
         # Skip people with too few valid images
         if len(valid_image_files) < min_images_per_person:
-            print(f"Skipping {person_id}: only {len(valid_image_files)} valid images (need at least {min_images_per_person})")
             skipped_persons += 1
             continue
         

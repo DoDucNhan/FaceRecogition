@@ -46,3 +46,29 @@ python main.py --data_dir ./AFD_Images \
     --epochs 100 \
     --early_stopping 0 \
     --num_workers 4
+
+
+----------------- cmd with pytorch-lightning-------------
+# Start a new training run
+python main.py --data_dir ./AFD_Images --output_dir ./outputs/facenet_arcface-unpg_output \
+--pretrained \
+--use_unpg \
+--freeze_groups 4 \
+--batch_size 128 \
+--mixed_precision \
+--unfreeze_epoch 1 \
+--epochs 10 \
+--save_freq 2 \
+--early_stopping 5
+
+# Resume after interruption (auto-detects latest checkpoint)
+python main.py --data_dir ./AFD_Images --output_dir ./outputs/facenet_arcface-unpg_output --resume
+
+# Resume from specific checkpoint
+python main.py --data_dir ./AFD_Images --output_dir ./outputs/facenet_arcface-unpg_output --resume_from_checkpoint ./outputs/facenet_arcface-unpg_output/last.ckpt
+
+# Find the latest valid checkpoint
+python -m utils.repair_checkpoint --dir ./output --action find
+
+# Repair a corrupted checkpoint
+python -m utils.repair_checkpoint --dir ./output --action repair --checkpoint ./output/corrupted.ckpt --valid-checkpoint ./output/valid.ckpt

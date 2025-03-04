@@ -1,7 +1,8 @@
-import numpy as np
-import torch
 import random
 import os
+import numpy as np
+import torch
+
 
 def set_seed(seed=42):
     """
@@ -18,13 +19,4 @@ def set_seed(seed=42):
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-
-def ensure_dir(directory):
-    """
-    Create directory if it doesn't exist
-    
-    Args:
-        directory: Directory path
-    """
-    if not os.path.exists(directory):
-        os.makedirs(directory)
+    os.environ['PYTHONHASHSEED'] = str(seed)
