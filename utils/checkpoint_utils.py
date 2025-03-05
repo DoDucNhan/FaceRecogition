@@ -157,7 +157,7 @@ def find_valid_checkpoint(checkpoint_dir, pattern="facenet-*.ckpt", max_attempts
     return None
 
 
-def load_metrics_for_callback(metrics_callback, checkpoint_path):
+def load_metrics_for_callback(metrics_callback, state_dir):
     """
     Load metrics from checkpoint directory for callback
     
@@ -168,15 +168,9 @@ def load_metrics_for_callback(metrics_callback, checkpoint_path):
     Returns:
         bool: True if metrics were loaded successfully
     """
-    # Try to find metrics.json in the same directory as the checkpoint
-    checkpoint_dir = os.path.dirname(checkpoint_path)
-    metrics_file = os.path.join(checkpoint_dir, 'metrics.json')
+    # Try to find metrics.json in the states directory
+    metrics_file = os.path.join(state_dir, 'metrics.json')
     
-    if os.path.exists(metrics_file):
-        return metrics_callback.load_from_file(metrics_file)
-    
-    # If not found, try to find it in the parent directory
-    metrics_file = os.path.join(os.path.dirname(checkpoint_dir), 'metrics.json')
     if os.path.exists(metrics_file):
         return metrics_callback.load_from_file(metrics_file)
     

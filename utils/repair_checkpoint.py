@@ -1,11 +1,8 @@
 import os
-import sys
 import argparse
 import torch
 import glob
-from pathlib import Path
 import shutil
-import json
 
 
 def list_checkpoints(checkpoint_dir, pattern="*.ckpt"):

@@ -7,12 +7,11 @@ import torch
 
 from model.facenet_lightning import FaceNetLightning
 from data.data_module import FaceDataModule
-from utils.helpers import set_seed
 from utils.checkpoint_callback import RobustCheckpointCallback
-from utils.checkpoint_utils import find_valid_checkpoint, load_training_state
+from utils.checkpoint_utils import find_valid_checkpoint, load_training_state, load_metrics_for_callback
 from utils.metrics_callback import MetricsLogger
 
-# torch.set_float32_matmul_precision('medium' | 'high')
+torch.set_float32_matmul_precision('medium')
 torch.cuda.empty_cache()
 
 
@@ -22,6 +21,8 @@ def main():
     # Dataset parameters
     parser.add_argument('--data_dir', type=str, required=True, help='Path to dataset directory')
     parser.add_argument('--output_dir', type=str, default='./outputs', help='Output directory')
+    parser.add_argument('--state_dir', type=str, default='./states', 
+                        help='Directory for the training and metrics state')
     parser.add_argument('--min_images', type=int, default=2, help='Minimum images per person')
     parser.add_argument('--validate_images', action='store_true', help='Validate images before training')
     parser.add_argument('--val_split', type=float, default=0.2, help='Validation split ratio')
@@ -30,11 +31,13 @@ def main():
     parser.add_argument('--pretrained', action='store_true', help='Use pretrained model')
     
     # Training parameters
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
     parser.add_argument('--epochs', type=int, default=30, help='Number of epochs')
     parser.add_argument('--early_stopping', type=int, default=10, 
                         help='Patience for early stopping (epochs with no improvement before stopping, 0 to disable)')
     parser.add_argument('--lr', type=float, default=0.005, help='Learning rate')
+    parser.add_argument('--grad_accumulation', type=int, default=2, 
+                        help='Number of steps to accumulate gradients')
     
     # Arguments for ArcFace+UNPG
     parser.add_argument('--use_unpg', action='store_true', 
@@ -75,27 +78,26 @@ def main():
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(args.state_dir, exist_ok=True)
     
     # Set random seed
-    set_seed(args.seed)
+    pl.seed_everything(args.seed)
     
     # Handle resumption - first check if we should auto-detect checkpoint
     checkpoint_path = None
     start_epoch = 0
     resume_state = None
     
-    print(f"Resume flag: {args.resume}")
-    print(f"Resuming from specific checkpoint: {args.resume_from_checkpoint}")
     if args.resume:
         # Look for valid checkpoint
         checkpoint_path = find_valid_checkpoint(args.output_dir)
         if checkpoint_path:
             print(f"Found checkpoint to resume from: {checkpoint_path}")
             # Load training state if available
-            resume_state = load_training_state(args.output_dir)
-            if resume_state:
-                print(f"Resuming from epoch {resume_state['epoch']}")
-                start_epoch = resume_state['epoch']
+            resume_state = load_training_state(args.state_dir)
+            if resume_state is None:
+                print(f"WARNING: Could not load previous training state from checkpoint {args.state_dir}")
+
 
     elif args.resume_from_checkpoint is not None:
         # Use explicitly provided checkpoint path
@@ -103,11 +105,29 @@ def main():
             checkpoint_path = args.resume_from_checkpoint
             print(f"Using specified checkpoint: {checkpoint_path}")
             # Load training state if available
-            resume_state = load_training_state(args.output_dir)
-            if resume_state:
-                print(f"Resuming from epoch {resume_state['epoch']}")
-                start_epoch = resume_state['epoch']
-    print("Checkpoint path:", checkpoint_path)
+            resume_state = load_training_state(args.state_dir)
+            if resume_state is None:
+                print(f"WARNING: Could not load previous training state from checkpoint {args.state_dir}")
+            
+    if resume_state:
+        print("Loading previous state................")
+        excluded_fields = [
+            "output_dir", 
+            "log_dir", 
+            "experiment_name", 
+            "resume", 
+            "resume_from_checkpoint"
+        ]
+
+        # Update args directly, skipping excluded fields
+        for key, value in resume_state["args"].items():
+            if key not in excluded_fields:
+                setattr(args, key, value)
+
+        print(f"Resuming from epoch {resume_state['epoch']}")
+        start_epoch = resume_state['epoch']
+   
+
     # Initialize data module
     data_module = FaceDataModule(
         data_dir=args.data_dir,
@@ -147,6 +167,7 @@ def main():
     # Custom robust checkpoint callback
     checkpoint_callback = RobustCheckpointCallback(
         dirpath=args.output_dir,
+        state_dir=args.state_dir,
         filename="facenet-{epoch:02d}-{val_accuracy:.4f}",
         monitor="val_accuracy",
         mode="max",
@@ -171,19 +192,19 @@ def main():
     # Learning rate monitor
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
     callbacks.append(lr_monitor)
-    
-    # Set up logger
-    logger = TensorBoardLogger(
-        save_dir=args.log_dir,
-        name=args.experiment_name,
-        version=None  # Auto-incremented version
-    )
 
     # Add our custom metrics logger
     metrics_logger = MetricsLogger(
         log_dir=args.log_dir,
+        state_dir=args.state_dir,
         experiment_name=args.experiment_name
     )
+    if checkpoint_path:
+        if load_metrics_for_callback(metrics_logger, args.state_dir):
+            print("Loaded metrics from previous training run")
+        else:
+            print("WARNING: Metrics could not be loaded from checkpoint \n Use the default metrics logger")
+
     callbacks.append(metrics_logger)
     
     # Initialize Trainer
@@ -192,13 +213,13 @@ def main():
     # Set max epochs based on resume state if available
     max_epochs = args.epochs
     if start_epoch > 0:
-        max_epochs = max(args.epochs, start_epoch + 5)  # At least 5 more epochs
+        max_epochs = max(args.epochs, start_epoch + 20)  # At least 20 more epochs
     
     # Instead of passing resume_from_checkpoint to the Trainer constructor:
     trainer = pl.Trainer(
         max_epochs=max_epochs,
         callbacks=callbacks,
-        logger=logger,
+        accumulate_grad_batches=args.grad_accumulation,
         precision=precision,
         log_every_n_steps=10,
         default_root_dir=args.output_dir,
@@ -208,47 +229,12 @@ def main():
 
     # If we have a checkpoint, use this pattern instead:
     if checkpoint_path:
-        # print(f"Loading checkpoint from {checkpoint_path} but skipping optimizer state")
-        # checkpoint = torch.load(checkpoint_path, map_location=lambda storage, loc: storage)
-        # model.load_state_dict(checkpoint['state_dict'], strict=False)
-        
-        # Set current epoch from checkpoint if available
-        # if 'epoch' in checkpoint:
-        #     current_epoch = checkpoint['epoch']
-        #     print(f"Resuming from epoch {current_epoch}")
         print(f"Loading checkpoint from {checkpoint_path}")
-        # checkpoint = torch.load(checkpoint_path, map_location=lambda storage, loc: storage)
-        # # Load the model state dict
-        # model.load_state_dict(checkpoint['state_dict'], strict=False)
-        # print("Model weights loaded successfully")
-        # # Set model-specific variables
-        # if 'current_frozen_groups' in checkpoint and hasattr(model, 'current_frozen_groups'):
-        #     print(f"Setting current_frozen_groups to {checkpoint['current_frozen_groups']}")
-        #     model.current_frozen_groups = checkpoint['current_frozen_groups']
-        
-        # if 'prev_accuracy' in checkpoint and hasattr(model, 'prev_accuracy'):
-        #     model.prev_accuracy = checkpoint['prev_accuracy']
-        
-        # if 'adaptive_patience_counter' in checkpoint and hasattr(model, 'adaptive_patience_counter'):
-        #     model.adaptive_patience_counter = checkpoint['adaptive_patience_counter']
-
-        # from utils.checkpoint_utils import load_metrics_for_callback
-        # metrics_logger = load_metrics_for_callback(metrics_logger, checkpoint_path)
-        # print("Loaded metrics from previous training run")
-
-        # Do not pass checkpoint_path to trainer.fit
-        trainer.fit_loop.epoch_progress.current.processed = start_epoch - 1
+        trainer.fit_loop.epoch_progress.current.processed = start_epoch
         trainer.fit(model, data_module, ckpt_path=checkpoint_path)
     else:
+        print("Starting training from scratch")
         trainer.fit(model, data_module)
-
-    # if checkpoint_path:
-    #     trainer.fit(model, data_module, ckpt_path=checkpoint_path)
-    #     from utils.checkpoint_utils import load_metrics_for_callback
-    #     load_metrics_for_callback(metrics_logger, checkpoint_path)
-    #     print("Loaded metrics from previous training run")
-    # else:
-    #     trainer.fit(model, data_module)
     
     # Print best model path
     if hasattr(checkpoint_callback, 'best_model_path') and checkpoint_callback.best_model_path:

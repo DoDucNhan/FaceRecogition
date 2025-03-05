@@ -19,7 +19,8 @@ class RobustCheckpointCallback(Callback):
     """Custom callback for robust checkpoint handling with backup and integrity check"""
     
     def __init__(self, 
-                 dirpath, 
+                 dirpath,
+                 state_dir,
                  filename="{epoch:02d}-{val_accuracy:.4f}",
                  monitor="val_accuracy",
                  mode="max",
@@ -46,6 +47,7 @@ class RobustCheckpointCallback(Callback):
         """
         super().__init__()
         self.dirpath = dirpath
+        self.state_dir = state_dir
         self.filename = filename
         self.monitor = monitor
         self.mode = mode
@@ -95,7 +97,7 @@ class RobustCheckpointCallback(Callback):
         if verify_checkpoint_integrity(filepath):
             # Save additional state if args provided
             if self.args:
-                save_training_state(self.args, epoch, self.dirpath)
+                save_training_state(self.args, epoch, self.state_dir)
             
             # Check if this is best model
             if monitor_val is not None:

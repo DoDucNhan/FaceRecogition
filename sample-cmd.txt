@@ -50,16 +50,21 @@ python main.py --data_dir ./AFD_Images \
 
 ----------------- cmd with pytorch-lightning-------------
 # Start a new training run
-python main.py --data_dir ./AFD_Images --output_dir ./outputs/facenet_arcface-unpg_output \
+python main.py --data_dir ./AFD_Images --output_dir ./outputs/facenet-512_arcface-unpg_500_epochs \
 --pretrained \
 --use_unpg \
---freeze_groups 4 \
---batch_size 128 \
+--lr_scheduler sgdr \
+--freeze_groups 7 \
+--batch_size 64 \
+--grad_accumulation 2 \
 --mixed_precision \
---unfreeze_epoch 1 \
---epochs 10 \
---save_freq 2 \
---early_stopping 5
+--unfreeze_epoch 50 \
+--epochs 500 \
+--save_freq 15 \
+--early_stopping 0
+
+## Resume
+python main.py --data_dir ./AFD_Images --output_dir ./outputs/facenet-512_arcface-unpg_500_epochs-resume --resume_from_checkpoint ./outputs/facenet-512_arcface-unpg_500_epochs/latest.ckpt
 
 # Resume after interruption (auto-detects latest checkpoint)
 python main.py --data_dir ./AFD_Images --output_dir ./outputs/facenet_arcface-unpg_output --resume
@@ -72,3 +77,18 @@ python -m utils.repair_checkpoint --dir ./output --action find
 
 # Repair a corrupted checkpoint
 python -m utils.repair_checkpoint --dir ./output --action repair --checkpoint ./output/corrupted.ckpt --valid-checkpoint ./output/valid.ckpt
+
+# For testing 
+python main.py --data_dir ./AFD_Images --output_dir ./outputs/facenet_arcface-unpg_output \
+--pretrained \
+--use_unpg \
+--freeze_groups 7 \
+--batch_size 64 \
+--grad_accumulation 2 \
+--mixed_precision \
+--unfreeze_epoch 1 \
+--epochs 10 \
+--save_freq 2 \
+--early_stopping 0
+
+python main.py --data_dir ./AFD_Images --output_dir ./outputs/facenet_arcface-unpg_output-resume -- --resume_from_checkpoint ./outputs/facenet_arcface-unpg_output/last.ckpt

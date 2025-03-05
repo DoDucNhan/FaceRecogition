@@ -98,7 +98,7 @@ class FaceNetLightning(pl.LightningModule):
         self.freeze_initial_layers = freeze_initial_layers
         self.unfreeze_epoch_freq = unfreeze_epoch_freq
         self.current_frozen_groups = freeze_initial_layers
-        self.adaptive_patience_counter = 0
+        self.adaptive_patience_counter = 20
         self.prev_accuracy = 0.0
         
         # Training configuration
@@ -135,18 +135,6 @@ class FaceNetLightning(pl.LightningModule):
     def on_load_checkpoint(self, checkpoint):
         """Called when loading a checkpoint - handle resumption appropriately"""
         state_dict = checkpoint['state_dict']
-        # print("Current Param Groups:", [len(g["params"]) for g in self.optimizers()])
-        # checkpoint_optimizer = checkpoint["optimizer_states"][0]
-        # print("Checkpoint Param Groups:", [len(g["params"]) for g in checkpoint_optimizer["param_groups"]])
-        optimizer_states = checkpoint['optimizer_states']
-
-        if len(optimizer_states) > 1:
-            UserWarning("We use more than one optimizer, the loading is not implemented for this case")
-
-        checkpoint_state_dict = optimizer_states[0]
-        print("Checkpoint optimizer state dict keys:", checkpoint_state_dict.keys())
-        print("Checkpoint number params:", len(checkpoint_state_dict['param_groups'][0]['params']))
-        print("Checkpoint params:", checkpoint_state_dict['param_groups'])
 
         # Check if we need to update the criterion (number of classes might have changed)
         if hasattr(self.criterion, 'num_classes') and self.criterion.num_classes != self.num_classes:
@@ -279,25 +267,6 @@ class FaceNetLightning(pl.LightningModule):
             self.current_frozen_groups -= 1
             self.current_frozen_groups = self._freeze_layers(self.current_frozen_groups)
 
-            # Collect newly unfrozen parameters
-            newly_unfrozen_params = []
-            for name, param in self.model.named_parameters():
-                if param.requires_grad and param in previously_frozen_params:
-                    newly_unfrozen_params.append(param) 
-            
-            # Add newly unfrozen parameters to optimizer if there are any
-            if newly_unfrozen_params:
-                optimizer = self.trainer.optimizers[0]
-                # optimizer.param_groups[0]['params'].extend(newly_unfrozen_params)
-                # optimizer.param_groups[0]['lr'] = self.learning_rate * 0.5
-                optimizer.add_param_group({
-                    'params': newly_unfrozen_params,
-                    'lr': self.learning_rate * 0.5,  # Start with lower learning rate for new params
-                    'weight_decay': self.weight_decay
-                })
-                
-                print(f"Added {len(newly_unfrozen_params)} parameters to optimizer")
-            
             # Log unfreezing event
             self.log('unfrozen_groups', len(self._get_layer_groups()) - self.current_frozen_groups)
             self.adaptive_patience_counter = 0
@@ -414,49 +383,19 @@ class FaceNetLightning(pl.LightningModule):
         return accuracy
     
 
-    # def _merge_optimizer_state_dict(self, optimizer, checkpoint):
-        
-    #     optimizer_states = checkpoint['optimizer_states']
-
-    #     if len(optimizer_states) > 1:
-    #         UserWarning("We use more than one optimizer, the loading is not implemented for this case")
-
-    #     checkpoint_state_dict = optimizer_states[0]
-    #     print("Checkpoint optimizer state dict keys:", checkpoint_state_dict.keys())
-    #     print("Checkpoint number params:", len(checkpoint_state_dict['param_groups'][0]['params']))
-    #     print("Checkpoint params:", checkpoint_state_dict['param_groups'][0]['params'])
-    #     flag_state_dict = optimizer.state_dict()
-    #     print("Optimizer state dict keys:", flag_state_dict.keys())
-    #     print("Optimizer number params:", len(flag_state_dict['param_groups'][0]['params']))
-    #     print("Optimizer params:", flag_state_dict['param_groups'][0]['params'])
-
-    #     flag_state_dict['state'] = checkpoint_state_dict['state']
-    #     print("Optimizer state dict keys after merging:", flag_state_dict.keys())
-
-    #     # load the model weights and the same optimizer with its optimizer state (to resume a training), but the optimizer type must be the same
-    #     optimizer.load_state_dict(checkpoint_state_dict)
-    #     return optimizer
-
-
     def configure_optimizers(self):
         """Configure optimizers and learning rate schedulers"""
         # Only include parameters that require gradients
         optimizer = optim.Adam(
-            filter(lambda p: p.requires_grad, self.parameters()), 
+            self.parameters(), 
             lr=self.learning_rate, 
             weight_decay=self.weight_decay
         )
         
-        # if self.resume_from_checkpoint:
-        #     checkpoint = torch.load(self.resume_from_checkpoint, map_location=lambda storage, loc: storage)
-        #     print("Loading optimizer from checkpoint...")
-        #     optimizer = self._merge_optimizer_state_dict(optimizer, checkpoint)
-        #     print('Optimizer loaded')
-
         # Configure scheduler
         if self.lr_scheduler == 'sgdr':
             scheduler = CosineAnnealingWarmRestarts(
-                optimizer, T_0=5, T_mult=2, eta_min=self.lr_min)
+                optimizer, T_0=20, T_mult=2, eta_min=self.lr_min)
             return {
                 'optimizer': optimizer,
                 'lr_scheduler': scheduler,
@@ -472,7 +411,7 @@ class FaceNetLightning(pl.LightningModule):
             }
         else:  # plateau
             scheduler = ReduceLROnPlateau(
-                optimizer, mode='max', factor=0.5, patience=3, 
+                optimizer, mode='max', factor=0.5, patience=5, 
                 min_lr=self.lr_min, verbose=True)
             return {
                 'optimizer': optimizer,

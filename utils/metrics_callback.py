@@ -13,7 +13,7 @@ class MetricsLogger(Callback):
     """
     Callback for tracking and visualizing training metrics similar to the original TrainingLogger
     """
-    def __init__(self, log_dir, experiment_name=None):
+    def __init__(self, log_dir, state_dir, experiment_name=None):
         """
         Initialize metrics logger
         
@@ -23,6 +23,7 @@ class MetricsLogger(Callback):
         """
         super().__init__()
         self.log_dir = log_dir
+        self.state_dir = state_dir
         
         # Create experiment name if not provided
         if experiment_name is None:
@@ -121,7 +122,7 @@ class MetricsLogger(Callback):
             **self.metrics
         }
         
-        metrics_file = os.path.join(self.experiment_dir, 'metrics.json')
+        metrics_file = os.path.join(self.state_dir, 'metrics.json')
         with open(metrics_file, 'w') as f:
             json.dump(metrics_data, f, indent=4)
 

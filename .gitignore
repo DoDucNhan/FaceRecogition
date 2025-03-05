@@ -2,6 +2,7 @@
 AFD_Images/
 logs/
 outputs/
+states/
 *.onnx
 *.pt
 
