@@ -233,7 +233,7 @@ def main():
         trainer.fit_loop.epoch_progress.current.processed = start_epoch
         trainer.fit(model, data_module, ckpt_path=checkpoint_path)
     else:
-        print("Starting training from scratch")
+        print("Starting tuning from scratch")
         trainer.fit(model, data_module)
     
     # Print best model path

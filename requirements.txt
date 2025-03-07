@@ -1,0 +1,10 @@
+facenet-pytorch
+torch
+torchvision
+torchaudio
+pytorch-lightning
+pandas
+matplotlib
+scikit-learn
+onnx
+tabulate

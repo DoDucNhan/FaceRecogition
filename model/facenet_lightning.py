@@ -370,9 +370,11 @@ class FaceNetLightning(pl.LightningModule):
             
         # Unfreeze next layer group if needed
         current_epoch = self.current_epoch + 1  # 0-based to 1-based
-        if (self.unfreeze_epoch_freq > 0 and current_epoch % self.unfreeze_epoch_freq == 0) or self.adaptive_patience_counter >= 10:
-            self._unfreeze_next_layer_group()
-            
+        if self.current_frozen_groups > 6: 
+            if ((self.unfreeze_epoch_freq > 0 and current_epoch % self.unfreeze_epoch_freq == 0) or 
+                self.adaptive_patience_counter >= 10):
+                self._unfreeze_next_layer_group()
+                
         self.prev_accuracy = accuracy
         torch.cuda.empty_cache()
         

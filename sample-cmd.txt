@@ -92,3 +92,23 @@ python main.py --data_dir ./AFD_Images --output_dir ./outputs/facenet_arcface-un
 --early_stopping 0
 
 python main.py --data_dir ./AFD_Images --output_dir ./outputs/facenet_arcface-unpg_output-resume -- --resume_from_checkpoint ./outputs/facenet_arcface-unpg_output/last.ckpt
+
+# For small epochs
+python main.py \
+  --data_dir ./AFD_Images \
+  --output_dir ./outputs/facenet-512_arcface-unpg_50_epochs\
+  --experiment_name "facenet-freeze-6-layers_50_epochs" \
+  --batch_size 128 \
+  --grad_accumulation 2 \
+  --epochs 50 \
+  --lr 0.005 \
+  --pretrained \
+  --use_unpg \
+  --freeze_groups 7 \
+  --unfreeze_epoch 20 \
+  --lr_scheduler cosine \
+  --lr_min 1e-6 \
+  --weight_decay 2e-5 \
+  --mixed_precision \
+  --save_freq 5 \
+  --early_stopping 8
