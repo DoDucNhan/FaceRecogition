@@ -195,3 +195,135 @@ class ArcFaceLoss(nn.Module):
         
         # Fallback to standard ArcFace if not enough negatives or filtering removed all pairs
         return self.cross_entropy(self.s * cosine_with_margin, labels), cosine_with_margin
+    
+
+class TripletLoss(nn.Module):
+    """
+    Triplet loss with semi-hard triplet mining following the original FaceNet paper
+    
+    Args:
+        margin: Margin for triplet loss (default: 0.2)
+        squared: Use squared Euclidean distance (default: True)
+    """
+    def __init__(self, margin=0.2, squared=True):
+        super(TripletLoss, self).__init__()
+        self.margin = margin
+        self.squared = squared
+        
+    def forward(self, embeddings, labels):
+        """
+        Args:
+            embeddings: Tensor of shape (batch_size, embedding_size)
+            labels: Tensor of shape (batch_size)
+            
+        Returns:
+            triplet_loss: Scalar tensor containing the triplet loss
+        """
+        # Normalize embeddings
+        embeddings = F.normalize(embeddings, p=2, dim=1)
+        
+        # Get pairwise distance matrix
+        pairwise_dist = self._pairwise_distances(embeddings)
+        
+        # For each anchor, get the hardest positive and semi-hardest negative
+        hardest_positive_dist = self._get_hardest_positive_dist(pairwise_dist, labels)
+        semi_hard_negative_dist = self._get_semi_hard_negative_dist(pairwise_dist, labels, hardest_positive_dist)
+        
+        # Calculate triplet loss
+        loss = F.relu(hardest_positive_dist - semi_hard_negative_dist + self.margin)
+        
+        # Count number of non-zero (active) triplets
+        non_zero_triplets = torch.sum(loss > 1e-16).float()
+        
+        # Return mean over positive triplets
+        return torch.mean(loss), embeddings
+    
+    def _pairwise_distances(self, embeddings):
+        """Compute pairwise distances between embeddings"""
+        # Get dot product (batch_size, batch_size)
+        dot_product = torch.matmul(embeddings, embeddings.t())
+        
+        # Get squared L2 norm for each embedding
+        square_norm = torch.diagonal(dot_product)
+        
+        # Calculate pairwise distances
+        # ||a - b||^2 = ||a||^2 + ||b||^2 - 2 * <a, b>
+        distances = square_norm.unsqueeze(0) + square_norm.unsqueeze(1) - 2.0 * dot_product
+        
+        # Because of computation errors, some distances might be negative
+        # So we eliminate these values by setting them to zero
+        distances = F.relu(distances)
+        
+        if not self.squared:
+            # Add small epsilon for numerical stability before taking square root
+            mask = distances > 0
+            distances = distances + 1e-16 * (1.0 - mask.float())
+            distances = torch.sqrt(distances)
+        
+        return distances
+    
+    def _get_hardest_positive_dist(self, pairwise_dist, labels):
+        """
+        For each anchor, get the hardest positive (largest distance to same class)
+        
+        Args:
+            pairwise_dist: Pairwise distance matrix
+            labels: Labels for each sample
+            
+        Returns:
+            hardest_positive_dist: Distances of hardest positives
+        """
+        # Create mask for positive pairs (same class)
+        mask_positives = labels.unsqueeze(0) == labels.unsqueeze(1)
+        
+        # Remove diagonal elements (same sample)
+        mask_positives = mask_positives.logical_xor(torch.eye(labels.size(0), device=labels.device).bool())
+        
+        # Replace non-positives with very large number
+        masked_dists = pairwise_dist.clone()
+        masked_dists[~mask_positives] = 1e12
+        
+        # Get hardest positive (maximum distance)
+        hardest_positive_dist = torch.min(masked_dists, dim=1)[0]
+        
+        return hardest_positive_dist
+    
+    def _get_semi_hard_negative_dist(self, pairwise_dist, labels, hardest_positive_dist):
+        """
+        For each anchor, get the semi-hard negative (different class, but not too far)
+        
+        Args:
+            pairwise_dist: Pairwise distance matrix
+            labels: Labels for each sample
+            hardest_positive_dist: Distances of hardest positives
+            
+        Returns:
+            semi_hard_negative_dist: Distances of semi-hard negatives
+        """
+        # Create mask for negative pairs (different class)
+        mask_negatives = labels.unsqueeze(0) != labels.unsqueeze(1)
+        
+        # Create semi-hard negative mask (negatives that are closer than hardest positive + margin)
+        semi_hard_mask = (pairwise_dist < hardest_positive_dist.unsqueeze(1) + self.margin) & mask_negatives
+        
+        # If there are no semi-hard negatives, use the hardest negatives instead
+        # First, identify samples that have no semi-hard negatives
+        no_semi_hard = (torch.sum(semi_hard_mask.float(), dim=1) == 0)
+        
+        # Initialize array to store selected negative distances
+        selected_negative_dist = torch.zeros_like(hardest_positive_dist)
+        
+        # For each anchor...
+        for i in range(labels.size(0)):
+            if no_semi_hard[i]:
+                # No semi-hard negative, use hardest negative (closest)
+                masked_dists = pairwise_dist[i].clone()
+                masked_dists[~mask_negatives[i]] = 1e12
+                selected_negative_dist[i] = torch.min(masked_dists)
+            else:
+                # Has semi-hard negatives, choose closest semi-hard
+                masked_dists = pairwise_dist[i].clone()
+                masked_dists[~semi_hard_mask[i]] = 1e12
+                selected_negative_dist[i] = torch.min(masked_dists)
+        
+        return selected_negative_dist
